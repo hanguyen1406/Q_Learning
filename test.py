@@ -1,142 +1,125 @@
-# coppelia_qlearning_4rays.py
-import numpy as np, random
+# nav_ab_qlearning_4rays.py
+import math, random, numpy as np
 from coppeliasim_zmqremoteapi_client import RemoteAPIClient
 
-# ====== Tham số dễ chỉnh ======
-LEFT_JOINT_PATH   = '/PioneerP3DX/leftMotor'
-RIGHT_JOINT_PATH  = '/PioneerP3DX/rightMotor'
+# ====== Config ======
+MODE = "demo"  # "train" hoặc "demo"
+LEFT, RIGHT = '/PioneerP3DX/leftMotor', '/PioneerP3DX/rightMotor'
+RAYS = {
+    "front": '/PioneerP3DX/up',
+    "back":  '/PioneerP3DX/down',
+    "left":  '/PioneerP3DX/left',
+    "right": '/PioneerP3DX/right'
+}
+GOAL_A, GOAL_B = '/Cuboid', '/handtruck'
+WHEEL_SPEED, ACTIONS = 6.0, 3
 
-# 4 tia ray gắn trong PioneerP3DX
-RAY_FRONT_PATH = '/PioneerP3DX/up'     # front
-RAY_BACK_PATH  = '/PioneerP3DX/down'   # back
-RAY_LEFT_PATH  = '/PioneerP3DX/left'   # left
-RAY_RIGHT_PATH = '/PioneerP3DX/right'  # right
+# thresholds
+RTH_NEAR, RTH_MED, RTH_FAR, MAX_RANGE = 0.15, 0.30, 0.65, 3.0
+GOAL_BINS, GOAL_REACHED = [0.20, 0.50, 1.00], 0.20
+BEARING_BINS = [-60, -15, 15, 60]
 
-ACTIONS = 3                 # 0: thẳng, 1: rẽ trái, 2: rẽ phải
-WHEEL_SPEED = 6.28          # rad/s
-SECTORS = 4                 # 4 tia cố định: front/right/left/back
+# Q-learning
+ALPHA, GAMMA = 0.5, 0.9
+EPS_START, EPS_MIN, EPS_DECAY = 1.0, 0.1, 0.995
+MAX_STEPS, N_EP = 1200, (200 if MODE=="train" else 1)
+QFILE = 'Qtable_nav_ab.npy'
 
-# Ngưỡng theo mét cho phân loại khoảng cách
-THRESH_NEAR   = 0.15        # < 0.15 m  -> -1 (rất gần/nguy hiểm)
-THRESH_MEDIUM = 0.30        # [0.15,0.30) -> 0
-THRESH_FAR    = 0.65        # [0.30,0.65) -> 1 ; >=0.65 -> 2
-MAX_RANGE     = 3.00        # khớp Ray length của sensor; dùng khi không phát hiện
+# ====== Helpers ======
+def bin_ray(d): return 0 if d<RTH_NEAR else 1 if d<RTH_MED else 2 if d<RTH_FAR else 3
+def bin_dist(d): return next((i for i,t in enumerate(GOAL_BINS) if d<t), len(GOAL_BINS))
+def bin_bear(b):
+    if b<BEARING_BINS[0]: return 0
+    if b<BEARING_BINS[1]: return 1
+    if b<=BEARING_BINS[2]: return 2
+    if b<=BEARING_BINS[3]: return 3
+    return 4
+def wrap(a): return (a+180)%360-180
+def dist(x1,y1,x2,y2): return math.hypot(x1-x2,y1-y2)
 
-ALPHA = 0.5
-GAMMA = 0.9
-EPS_START = 1.0
-EPS_MIN = 0.1
-EPS_DECAY = 0.999
+# ====== Connect ======
+client=RemoteAPIClient(); sim=client.getObject('sim')
+left,right=sim.getObject(LEFT),sim.getObject(RIGHT)
+rH={k:sim.getObject(v) for k,v in RAYS.items()}
+robot,goalA,goalB=sim.getObject('/PioneerP3DX'),sim.getObject(GOAL_A),sim.getObject(GOAL_B)
 
-# ====== Utils ======
-def classify_distance_m(d: float) -> int:
-    """Trả về {-1,0,1,2} theo ngưỡng mét."""
-    if d < THRESH_NEAR:         return -1
-    if d < THRESH_MEDIUM:       return 0
-    if d < THRESH_FAR:          return 1
-    return 2
+# ====== Q-table ======
+STATE_DIMS=(4,4,4,4,4,5); Qshape=STATE_DIMS+(ACTIONS,)
+try: Q=np.load(QFILE); assert Q.shape==Qshape
+except: Q=np.zeros(Qshape,np.float32)
 
-def reward_fn(states, action):
-    r = 0
-    if action in (1, 2): r -= 1      # rẽ nhẹ phạt
-    if action == 0:      r += 3      # đi thẳng thưởng
-    if -1 in states:     r -= 15     # rất gần vật cản
-    return r
+# ====== Sensors ======
+def read_ray(h):
+    d=sim.checkProximitySensor(h,sim.handle_all)[1]
+    return d if d and d>0 else MAX_RANGE
+def pose():
+    p,o=sim.getObjectPosition(robot,-1),sim.getObjectOrientation(robot,-1)
+    return p[0],p[1],o[2]
+def goal_pos(h): p=sim.getObjectPosition(h,-1); return p[0],p[1]
 
-def eps_greedy(Q, s_enc, eps):
-    # nếu cả 4 tia đều xa (2 -> enc=3) thì ưu tiên đi thẳng
-    if all(x == 3 for x in s_enc):
-        return 0
-    return int(np.argmax(Q[tuple(s_enc)])) if random.random() > eps else random.randint(0, ACTIONS-1)
+def get_state(goal):
+    rays=[read_ray(rH['front']),read_ray(rH['right']),
+          read_ray(rH['left']),read_ray(rH['back'])]
+    rb=[bin_ray(r) for r in rays]
+    rx,ry,yaw=pose(); gx,gy=goal_pos(goal)
+    dx,dy=gx-rx,gy-ry
+    rel=wrap(math.degrees(math.atan2(dy,dx))-math.degrees(yaw))
+    return tuple(rb+[bin_dist(math.hypot(dx,dy)),bin_bear(rel)]),rays,rel
 
-# ====== Kết nối CoppeliaSim ======
-client = RemoteAPIClient()
-sim = client.getObject('sim')
+# ====== Actions ======
+def act(a):
+    if a==0: vl,vr=WHEEL_SPEED,WHEEL_SPEED
+    elif a==1: vl,vr=-WHEEL_SPEED,WHEEL_SPEED
+    else: vl,vr=WHEEL_SPEED,-WHEEL_SPEED
+    sim.setJointTargetVelocity(left,vl); sim.setJointTargetVelocity(right,vr)
 
-left  = sim.getObject(LEFT_JOINT_PATH)
-right = sim.getObject(RIGHT_JOINT_PATH)
+# ====== Reward ======
+def rew(s,r,rel,goal):
+    R = -0.5                          # step cost thấp thôi
+    if 0 in s[:4]: R -= 20.0          # có tia rất gần -> phạt nặng
+    if s[0] <= 1: R -= 5.0            # trước mặt không an toàn
+    # thưởng hướng về goal (mượt dần theo |rel|)
+    R += max(0, 3.0 - abs(rel)/20.0)  # ~3 khi |rel|=0; 0 khi |rel|>=60
+    # về đích
+    rx,ry,_ = pose(); gx,gy = goal_pos(goal)
+    if math.hypot(rx-gx, ry-gy) < GOAL_REACHED: R += 120.0
+    return R
 
-hFront = sim.getObject(RAY_FRONT_PATH)
-hBack  = sim.getObject(RAY_BACK_PATH)
-hLeft  = sim.getObject(RAY_LEFT_PATH)
-hRight = sim.getObject(RAY_RIGHT_PATH)
+# ====== Reset ======
+def reset_to(h):
+    sim.stopSimulation()
+    while sim.getSimulationState()!=sim.simulation_stopped: pass
 
-# ====== Q-table: mỗi sector có 4 mã (enc 0..3) cho {-1,0,1,2} => shape (4,)^4 x ACTIONS
-try:
-    Q = np.load('Qtable.npy')
-    if Q.shape != (4,)*SECTORS + (ACTIONS,):
-        raise ValueError('Qtable shape mismatch')
-except Exception:
-    Q = np.zeros((4,)*SECTORS + (ACTIONS,), dtype=float)
+    if MODE=="train":
+        # chỉ train mới teleport
+        x,y=goal_pos(h)
+        sim.setObjectPosition(robot,-1,[x,y,0.05])
+        sim.setObjectOrientation(robot,-1,[0,0,random.uniform(-math.pi,math.pi)])
 
-# ====== Đọc 1 ray (yêu cầu sensor bật Explicit handling) ======
-def read_ray(handle) -> float:
-    # checkProximitySensor -> (detected, distance, detectedPoint, detectedObject, normalVector)
-    detected, dist, *_ = sim.checkProximitySensor(handle, sim.handle_all)
-    if detected > 0 and dist and dist > 0:
-        return float(dist)
-    return MAX_RANGE
+    sim.setJointTargetVelocity(left,0); sim.setJointTargetVelocity(right,0)
+    sim.setStepping(True); sim.startSimulation()
 
-# ====== Lấy state từ 4 tia ======
-def ray_states_4():
-    # thứ tự state: [front, right, left, back]
-    front = read_ray(hFront)
-    right = read_ray(hRight)
-    left  = read_ray(hLeft)
-    back  = read_ray(hBack)
 
-    # phân loại sang {-1,0,1,2}
-    s = [classify_distance_m(front),
-         classify_distance_m(right),
-         classify_distance_m(left),
-         classify_distance_m(back)]
-    return s
-
-# ====== Điều khiển robot ======
-def do_action(a):
-    if a == 0: vl, vr =  WHEEL_SPEED,  WHEEL_SPEED
-    elif a == 1: vl, vr = -WHEEL_SPEED,  WHEEL_SPEED
-    elif a == 2: vl, vr =  WHEEL_SPEED, -WHEEL_SPEED
-    else: vl, vr = 0.0, 0.0
-    sim.setJointTargetVelocity(left,  vl)
-    sim.setJointTargetVelocity(right, vr)
+# ====== Policy ======
+def policy(Q,s,eps):
+    return int(np.argmax(Q[s])) if random.random()>eps else random.randint(0,ACTIONS-1)
 
 # ====== Main loop ======
-sim.setStepping(True)
-sim.startSimulation()
-
-epsilon = EPS_START
-try:
-    while sim.getSimulationState() != sim.simulation_stopped:
-        # đọc 4 tia & mã hoá state
-        s = ray_states_4()              # [-1,0,1,2] x 4
-        s_enc = [x + 1 for x in s]      # enc thành [0..3] x 4 để index Q
-
-        # chọn hành động và thực thi
-        a = eps_greedy(Q, s_enc, epsilon)
-        do_action(a)
-
-        # tiến mô phỏng
-        sim.step()
-
-        # trạng thái tiếp theo + cập nhật Q
-        s2 = ray_states_4()
-        s2_enc = [x + 1 for x in s2]
-
-        R = reward_fn(s, a)
-        cur = Q[tuple(s_enc)+(a,)]
-        Q[tuple(s_enc)+(a,)] = cur + ALPHA*(R + GAMMA*np.max(Q[tuple(s2_enc)]) - cur)
-
-        # lưu Q
-        np.save('Qtable.npy', Q)
-
-        # epsilon decay
-        epsilon = max(EPS_MIN, epsilon*EPS_DECAY)
-
-        # phản xạ an toàn: nếu có -1 ở bất kỳ tia nào, lùi 1 bước ngắn
-        if -1 in s:
-            sim.setJointTargetVelocity(left,  -WHEEL_SPEED)
-            sim.setJointTargetVelocity(right, -WHEEL_SPEED)
-            sim.step()
-finally:
-    sim.stopSimulation()
+eps=EPS_START if MODE=="train" else 0.0
+for ep in range(N_EP):
+    start,goal=(goalA,goalB) if ep%2==0 else (goalB,goalA)
+    reset_to(start); steps=0
+    while sim.getSimulationState()!=sim.simulation_stopped and steps<MAX_STEPS:
+        s,rays,rel=get_state(goal); a=policy(Q,s,eps if MODE=="train" else 0)
+        act(a); sim.step()
+        s2,_,rel2=get_state(goal); R=rew(s,rays,rel,goal)
+        if MODE=="train":
+            cur=Q[s+(a,)]; Q[s+(a,)]=cur+ALPHA*(R+GAMMA*np.max(Q[s2])-cur)
+        rx,ry,_=pose(); gx,gy=goal_pos(goal)
+        if dist(rx,ry,gx,gy)<GOAL_REACHED: break
+        steps+=1
+    if MODE=="train":
+        eps=max(EPS_MIN,eps*EPS_DECAY); np.save(QFILE,Q)
+        print(f"EP{ep+1}/{N_EP} steps={steps} eps={eps:.3f}")
+    else: print(f"[DEMO] steps={steps}"); break
+sim.stopSimulation()
