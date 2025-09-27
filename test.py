@@ -2,12 +2,16 @@
 import math, time
 from coppeliasim_zmqremoteapi_client import RemoteAPIClient
 
-# ===== Config =====
+# ===== cấu hình môi trường =====
 LEFT, RIGHT = '/PioneerP3DX/leftMotor', '/PioneerP3DX/rightMotor'
 WHEEL_RADIUS = 0.07     # m
 BASELINE     = 0.30     # m
 LIN_SPEED    = 0.25     # m/s
 MAP_RES      = 0.5      # 1 cell = 0.5 m
+heading = 0.0  # robot hướng ban đầu (rad, trục Z)
+
+# ===== Cấu hình qlearning =====
+
 
 # ===== Connect =====
 client = RemoteAPIClient()
@@ -16,7 +20,7 @@ robot = sim.getObject('/PioneerP3DX')
 left  = sim.getObject(LEFT)
 right = sim.getObject(RIGHT)
 
-heading = 0.0  # robot hướng ban đầu (rad, trục Z)
+
 
 def resetRobot():
     global heading
@@ -63,6 +67,8 @@ resetRobot()
 for d in ["up", "up", "left", "up", "right", "down"]:
     move_cell(d)
     time.sleep(2)
+
+
 
 time.sleep(2)
 sim.stopSimulation()
