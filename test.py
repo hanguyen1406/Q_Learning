@@ -2,8 +2,6 @@
 import math, time
 import numpy as np
 from coppeliasim_zmqremoteapi_client import RemoteAPIClient
-
-
 # ===== cấu hình môi trường =====
 LEFT, RIGHT = '/PioneerP3DX/leftMotor', '/PioneerP3DX/rightMotor'
 WHEEL_RADIUS = 0.07     # m
@@ -13,17 +11,15 @@ MAP_RES      = 0.5      # 1 cell = 0.5 m
 MAX_RANGE = 3.0  # khớp với Ray length trong properties
 heading = 0.0  # robot hướng ban đầu (rad, trục Z)
 actions = ["up", "down", "left", "right"]
-
 # ===== Cấu hình qlearning =====
-gA = 0
+last_d = None # khoảng cách đến đích ở step trước
 # Kích thước rời rạc hóa
-q_table_size = [101, 101, 36, 10] + [4, 4, 4, 4] + [4]  # = 10 chiều state
+q_table_size = [36, 10] + [4, 4, 4, 4] + [4]  # = 10 chiều state
 num_actions = 4
-
+max_step = 10000
 # Khởi tạo Q-table
-Q = np.zeros((q_table_size))
-nStates = 100 * 4 * 10 * 4 * (4**4) * 2  # x,y,θ,dt,Δθ,4rays,gA
-learningRate = 0.1    # learning rate
+Q = None
+learningRate = 0.5    # learning rate
 discountFactor = 0.9  # discount factor
 v_epsilon = 0.9
 numEps = 1000
@@ -48,6 +44,18 @@ ray_handles = {
     "right": sim.getObject('/PioneerP3DX/right')
 }
 
+def save_Qtable(Qtable, filename='Qtable.npy'):
+    np.save(filename, Qtable)
+    print("Q-table đã lưu!")
+
+def load_Qtable(filename='Qtable.npy'):
+    try:
+        Qtable = np.load(filename)
+        print("load Q-table!")
+    except FileNotFoundError:
+        Qtable = np.zeros((q_table_size))  # Nếu không có file, khởi tạo bảng Q mặc định
+        print("không thấy Q-table, tạo mới!")
+    return Qtable
 
 def read_ray(handle):
     res = sim.checkProximitySensor(handle, sim.handle_all)
@@ -58,16 +66,12 @@ def read_ray(handle):
         return MAX_RANGE
     
 def quantize_angle(theta_rad):
-    # rad → độ, đưa về [0, 360)
     deg = (math.degrees(theta_rad) % 360 + 360) % 360
-    # chia thành 36 mức (0,10,20,...,350)
     idx = int(round(deg / 10)) % 36
     return idx
 
 def discretize(value, low=-5.0, high=5.0, step=0.1):
- # Làm tròn đến 1 chữ số thập phân
     rounded = round(value, 1)
-    # Chuyển thành chỉ số int để index Q-table
     idx = int((rounded - low) / step)
     return idx
 
@@ -75,73 +79,40 @@ def world_to_cell(x, y):
     return [discretize(x, 1), discretize(y, 1)]
 
 def compute_reward(state):
-    xt, yt, theta, dt, dtheta, *scans, g = state
-
-    # Nếu va chạm (cảm biến = 0 hoặc nhỏ hơn ngưỡng)
+    theta, dt, dtheta, *scans, g = state
+    global last_d
     if min(scans) == 0:
         return -100, False
-    
-    # Nếu đã đến đích A và đang tìm A
-    # if dt < 0.2 and g == 0:
-    #     print(f"Đã đến đích A! Chuyển sang tìm đích B...")
-    #     return +100, True
-    
-    # Nếu đã đến đích B và đang tìm B  
     if dt == 0:
         print(f"Đã đến đích B! Hoàn thành nhiệm vụ!")
         return +100, True
-
-    # Nếu đang tiến gần đích (so sánh với step trước)
-    if hasattr(compute_reward, "last_d"):
-        reward = 5 * (compute_reward.last_d - dt)
-    else:
+    if last_d is None:
         reward = 0
-    compute_reward.last_d = dt
+    else:
+        reward = 5 * (last_d - dt)
+    last_d = dt
 
-    # Phạt mỗi bước nhỏ
     reward += -0.01
-
     return reward, False
 
-
-
 def get_state():
-    # --- Pose robot ---
     pos = sim.getObjectPosition(robot, -1)   # [x, y, z]
     ori = sim.getObjectOrientation(robot, -1)  # [alpha, beta, gamma] rad
     xt, yt = pos[0], pos[1]
     θt = ori[2]   # góc yaw
-
-    # --- Tính khoảng cách đến đích hiện tại ---
     posA = sim.getObjectPosition(dichB, -1)  # Vị trí đích A (Cuboid)
-    # posB = sim.getObjectPosition(dichB, -1)  # Vị trí đích B (handtruck)
-    
-    # if gA == 0:
     target_pos = posA
     dx, dy = target_pos[0] - xt, target_pos[1] - yt
     dt = np.sqrt(dx**2 + dy**2)
-    # Góc từ robot đến đích A
     angleToTarget = np.arctan2(dy, dx)
-    # else: 
-    #     target_pos = posB
-    #     dx, dy = target_pos[0] - xt, target_pos[1] - yt
-    #     dt = np.sqrt(dx**2 + dy**2)
-    #     # Góc từ robot đến đích B
-    #     angleToTarget = np.arctan2(dy, dx)
-
-    # --- Sai lệch hướng Δθt so với hướng đến đích ---
+   
     Δθt = angleToTarget - θt
     Δθt = np.arctan2(np.sin(Δθt), np.cos(Δθt))  # chuẩn hóa [-pi, pi]
-
-    # --- Scan 4 tia ---
     scans = []
     for name, h in ray_handles.items():
-        # print(name)
-        # dis = read_ray(h)
         dis = round(read_ray(h))
         scans.append(dis)
-        # quantize_angle(Δθt)
-    st = world_to_cell(xt, yt) + [quantize_angle(θt), round(dt)] + scans
+    st = [quantize_angle(θt), round(dt)] + scans
     return tuple(st)
 
 
@@ -159,52 +130,29 @@ def resetRobot():
     sim.setStepping(True)
     sim.startSimulation()
 
-
-
 def step(action):
-    # 1. Cho robot di chuyển 1 bước theo action
     move_cell(action)
-
-    # 2. Lấy state mới từ simulator
     next_state = get_state()   # [xt, yt, θt, dt, Δθt, scan1..n]
-
-    # 3. Tính reward
     reward, done = compute_reward(next_state)
-
     return next_state, reward, done
 
 def _run_for(dt, v, w=0.0):
-    """
-    Chạy trong dt giây với vận tốc tuyến tính v (m/s) và vận tốc góc w (rad/s).
-    v > 0: tiến; v < 0: lùi
-    w > 0: quay trái; w < 0: quay phải
-    """
-    # Tính tốc độ bánh trái/phải
     wL = (v - 0.5 * w * BASELINE) / WHEEL_RADIUS
     wR = (v + 0.5 * w * BASELINE) / WHEEL_RADIUS
-
     sim.setJointTargetVelocity(left,  wL)
     sim.setJointTargetVelocity(right, wR)
-
     tend = sim.getSimulationTime() + dt
     while sim.getSimulationTime() < tend:
         sim.step()
-
-    # Dừng
     sim.setJointTargetVelocity(left,  0)
     sim.setJointTargetVelocity(right, 0)
 
 
 def move_cell(direction: str):
     global heading
-
-    # Thời gian đi thẳng một ô (giảm còn 70% để chừa khoảng)
     t_fwd = (MAP_RES / LIN_SPEED) * 0.7
-    # Góc quay nhỏ (20 độ)
     small_angle = math.radians(20)
-    # Tốc độ góc quay (rad/s)
     w_turn = 0.6
-    # Thời gian cần để quay hết 20 độ
     t_turn = small_angle / w_turn
 
     if direction == "up":
@@ -219,7 +167,7 @@ def move_cell(direction: str):
         heading -= small_angle
 
 def episode_loop():
-    global v_epsilon, Q, actions, gA,max_ep_reward
+    global v_epsilon, Q, actions, gA, max_ep_reward, max_step
     for ep in range(numEps):
         resetRobot()
         print("Eps = ", ep)
@@ -228,46 +176,34 @@ def episode_loop():
         ep_reward = 0
         ep_start_state = current_state
         action_list = []
-        while not done:
-            
+        t = 0
+        while not done and t < max_step:
+            t += 1
             if np.random.random() > v_epsilon:
-                # Lấy argmax Q value của current_state
                 action = np.argmax(Q[current_state])
             else:
                 action = np.random.randint(0, num_actions)
-
             action_list.append(action)
-
             next_real_state, reward, done  = step(action=actions[action])
-            # print("Next real state:", next_real_state, "Reward:", reward, "Done:", done)
             ep_reward += reward
             if done:
-                #kiểm tra đến đích A hoặc B chưa
-                # if gA == 0 and next_real_state[3] < 0.2:
-                #     gA = 1
-                #     print("Đến đích A")
-                # elif gA == 1 and next_real_state[3] < 0.2:
-                #     gA = 2
-                #     print("Đến đích B")
-                # print("Đến đích")
                 if ep_reward > max_ep_reward:
                     max_ep_reward = ep_reward
                     max_ep_action_list = action_list
                     max_start_state = ep_start_state
             else:
-                # Update Q value cho (current_state, action)
-                # print("current state:", current_state)
-                # print("action:", action)
                 current_q_value = Q[current_state + (action,)]
                 new_q_value = (1 - learningRate) * current_q_value + learningRate * (reward + discountFactor * np.max(Q[next_real_state]))
                 Q[current_state + (action,)] = new_q_value
                 current_state = next_real_state
-
+            t += 1
+        save_Qtable(Q)
 
 print("Max reward = ", max_ep_reward)
 print("Max action list = ", max_ep_action_list)
 
 # ===== traning =====
+Q = load_Qtable()
 resetRobot()
 # for d in ["up", "left", "up", "up", "left", "right"]:
 #     move_cell(d)
