@@ -22,6 +22,7 @@ Q = None
 learningRate = 0.5    # learning rate
 discountFactor = 0.9  # discount factor
 v_epsilon = 0.9
+# v_epsilon = -1
 numEps = 1000
 previS = None
 
@@ -204,6 +205,7 @@ print("Max action list = ", max_ep_action_list)
 
 # ===== traning =====
 Q = load_Qtable()
+# print("Q shape:", Q)
 resetRobot()
 # for d in ["up", "left", "up", "up", "left", "right"]:
 #     move_cell(d)
@@ -211,9 +213,60 @@ resetRobot()
 #     print(d, ":", state)
 #     time.sleep(2)
 
+
+
+def _greedy_action(state):
+    global Q
+    qvals = Q[state]      
+    print(qvals)       # dạng (num_actions,)
+    return int(np.argmax(qvals)) # index hành động
+
+def demo_run_with_qtable(q_path="Qtable.npy"):
+    global v_epsilon, gA, max_step
+    # 2) Reset môi trường
+    resetRobot()
+    # 3) Chạy greedy: tắt thăm dò
+    old_eps = v_epsilon
+    v_epsilon = -1.0  # đảm bảo luôn chọn argmax
+    total_reward = 0.0
+    all_actions = []
+    try:
+        # Lần lượt mục tiêu A (gA=0) rồi B (gA=1)
+        s = get_state()
+        done = False
+        steps = 0
+        while not done and steps < max_step:
+            a_idx = _greedy_action(s)
+            a_str = actions[a_idx]          # map sang chuỗi "up"/"down"/"left"/"right"
+            ns, r, done = step(a_str)       # step trả về (next_state, reward, done)
+            total_reward += r
+            all_actions.append(a_str)
+            print(s, a_str, r, ns, done)
+            if steps == 5:
+                return 0
+
+            s = ns
+            steps += 1
+
+        if not done:
+            print(f"⚠️ Hết {max_step} bước nhưng chưa tới đích")
+        
+        else:
+            print(f"✅ Hoàn thành tới đích sau {steps} bước.")
+
+        print("\n=== KẾT THÚC DEMO ===")
+        print(f"Tổng reward: {total_reward:.3f}")
+        print(f"Số hành động: {len(all_actions)}")
+        # (tuỳ chọn) In vài hành động đầu/cuối:
+        print("Hành động đầu:", all_actions[:15])
+        print("Hành động cuối:", all_actions[-15:])
+
+    finally:
+        # Khôi phục epsilon
+        v_epsilon = old_eps
+
+# ===== demo chạy với Q-table đã học =====
+# demo_run_with_qtable()
 episode_loop()
-
-
-
 time.sleep(2)
 sim.stopSimulation()
