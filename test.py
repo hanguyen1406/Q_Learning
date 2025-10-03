@@ -19,9 +19,9 @@ num_actions = 4
 max_step = 10000
 # Khởi tạo Q-table
 Q = None
-learningRate = 0.5    # learning rate
+learningRate = 0.1    # learning rate
 discountFactor = 0.9  # discount factor
-v_epsilon = 0.9
+v_epsilon = 0.5
 # v_epsilon = -1
 numEps = 1000
 previS = None
@@ -79,21 +79,35 @@ def discretize(value, low=-5.0, high=5.0, step=0.1):
 def world_to_cell(x, y):
     return [discretize(x, 1), discretize(y, 1)]
 
-def compute_reward(state):
-    theta, dt, dtheta, *scans, g = state
+def compute_reward(state, action):
+    theta, dt, *scans = state
     global last_d
-    if min(scans) == 0:
-        return -100, False
-    if dt == 0:
-        print(f"Đã đến đích B! Hoàn thành nhiệm vụ!")
-        return +100, True
+    # 1) Phạt va chạm CHỈ theo hướng đang đi
+    hit = False
+    if action == "up"    and scans[0] == 0: hit = True
+    if action == "down"  and scans[1] == 0: hit = True
+    if action == "left"  and scans[2] == 0: hit = True
+    if action == "right" and scans[3] == 0: hit = True
+
+    if hit:
+        # va chạm thực sự ở phía đang đi: phạt nặng và kết thúc bước
+        return -100.0, False
+
+    # 2) Đến đích (dùng ngưỡng thay vì dt == 0)
+    if dt < 0.2:
+        print("Đã đến đích B! Hoàn thành nhiệm vụ!")
+        return +100.0, True
+
+    # 3) Thưởng khi tiến gần đích hơn so với bước trước
     if last_d is None:
-        reward = 0
+        reward = 0.0
     else:
-        reward = 5 * (last_d - dt)
+        reward = 5.0 * (last_d - dt)  # gần hơn → dương; xa hơn → âm
     last_d = dt
 
+    # 4) Phạt nhỏ theo bước để khuyến khích nhanh gọn
     reward += -0.01
+
     return reward, False
 
 def get_state():
@@ -134,7 +148,7 @@ def resetRobot():
 def step(action):
     move_cell(action)
     next_state = get_state()   # [xt, yt, θt, dt, Δθt, scan1..n]
-    reward, done = compute_reward(next_state)
+    reward, done = compute_reward(next_state, action)
     return next_state, reward, done
 
 def _run_for(dt, v, w=0.0):
@@ -197,7 +211,7 @@ def episode_loop():
                 new_q_value = (1 - learningRate) * current_q_value + learningRate * (reward + discountFactor * np.max(Q[next_real_state]))
                 Q[current_state + (action,)] = new_q_value
                 current_state = next_real_state
-            t += 1
+            
         save_Qtable(Q)
 
 print("Max reward = ", max_ep_reward)
@@ -215,58 +229,6 @@ resetRobot()
 
 
 
-def _greedy_action(state):
-    global Q
-    qvals = Q[state]      
-    print(qvals)       # dạng (num_actions,)
-    return int(np.argmax(qvals)) # index hành động
-
-def demo_run_with_qtable(q_path="Qtable.npy"):
-    global v_epsilon, gA, max_step
-    # 2) Reset môi trường
-    resetRobot()
-    # 3) Chạy greedy: tắt thăm dò
-    old_eps = v_epsilon
-    v_epsilon = -1.0  # đảm bảo luôn chọn argmax
-    total_reward = 0.0
-    all_actions = []
-    try:
-        # Lần lượt mục tiêu A (gA=0) rồi B (gA=1)
-        s = get_state()
-        done = False
-        steps = 0
-        while not done and steps < max_step:
-            a_idx = _greedy_action(s)
-            a_str = actions[a_idx]          # map sang chuỗi "up"/"down"/"left"/"right"
-            ns, r, done = step(a_str)       # step trả về (next_state, reward, done)
-            total_reward += r
-            all_actions.append(a_str)
-            print(s, a_str, r, ns, done)
-            if steps == 5:
-                return 0
-
-            s = ns
-            steps += 1
-
-        if not done:
-            print(f"⚠️ Hết {max_step} bước nhưng chưa tới đích")
-        
-        else:
-            print(f"✅ Hoàn thành tới đích sau {steps} bước.")
-
-        print("\n=== KẾT THÚC DEMO ===")
-        print(f"Tổng reward: {total_reward:.3f}")
-        print(f"Số hành động: {len(all_actions)}")
-        # (tuỳ chọn) In vài hành động đầu/cuối:
-        print("Hành động đầu:", all_actions[:15])
-        print("Hành động cuối:", all_actions[-15:])
-
-    finally:
-        # Khôi phục epsilon
-        v_epsilon = old_eps
-
-# ===== demo chạy với Q-table đã học =====
-# demo_run_with_qtable()
 episode_loop()
 time.sleep(2)
 sim.stopSimulation()
