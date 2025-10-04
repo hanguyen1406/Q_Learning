@@ -21,14 +21,13 @@ max_step = 10000
 Q = None
 learningRate = 0.1    # learning rate
 discountFactor = 0.9  # discount factor
-v_epsilon = 0.5
-# v_epsilon = -1
+# v_epsilon = 0.9
+v_epsilon = -1
 numEps = 1000
 previS = None
 
 max_ep_reward = -999
-max_ep_action_list = []
-max_start_state = None
+
 
 # ===== Connect =====
 client = RemoteAPIClient()
@@ -115,8 +114,11 @@ def get_state():
     ori = sim.getObjectOrientation(robot, -1)  # [alpha, beta, gamma] rad
     xt, yt = pos[0], pos[1]
     θt = ori[2]   # góc yaw
-    posA = sim.getObjectPosition(dichB, -1)  # Vị trí đích A (Cuboid)
-    target_pos = posA
+    #set lại góc xe thành ngang trước khi lấy giá trị scan
+    ori[1] = 0.0
+    sim.setObjectOrientation(robot, -1, ori)
+
+    target_pos = sim.getObjectPosition(dichB, -1)  # Vị trí đích A (Cuboid)
     dx, dy = target_pos[0] - xt, target_pos[1] - yt
     dt = np.sqrt(dx**2 + dy**2)
     angleToTarget = np.arctan2(dy, dx)
@@ -129,8 +131,6 @@ def get_state():
         scans.append(dis)
     st = [quantize_angle(θt), round(dt)] + scans
     return tuple(st)
-
-
 
 def resetRobot():
     global heading,gA
@@ -162,7 +162,6 @@ def _run_for(dt, v, w=0.0):
     sim.setJointTargetVelocity(left,  0)
     sim.setJointTargetVelocity(right, 0)
 
-
 def move_cell(direction: str):
     global heading
     t_fwd = (MAP_RES / LIN_SPEED) * 0.7
@@ -181,17 +180,18 @@ def move_cell(direction: str):
         _run_for(t_turn, 0.0, -w_turn)   # quay phải
         heading -= small_angle
 
+
 def episode_loop():
     global v_epsilon, Q, actions, gA, max_ep_reward, max_step
     for ep in range(numEps):
         resetRobot()
-        print("Eps = ", ep)
         done = False
         current_state = get_state()
         ep_reward = 0
         ep_start_state = current_state
         action_list = []
         t = 0
+        print("Eps =", ep, " - Epsilon =", v_epsilon)
         while not done and t < max_step:
             t += 1
             if np.random.random() > v_epsilon:
@@ -204,18 +204,13 @@ def episode_loop():
             if done:
                 if ep_reward > max_ep_reward:
                     max_ep_reward = ep_reward
-                    max_ep_action_list = action_list
-                    max_start_state = ep_start_state
             else:
                 current_q_value = Q[current_state + (action,)]
                 new_q_value = (1 - learningRate) * current_q_value + learningRate * (reward + discountFactor * np.max(Q[next_real_state]))
                 Q[current_state + (action,)] = new_q_value
                 current_state = next_real_state
-            
+        v_epsilon -= 0.01
         save_Qtable(Q)
-
-print("Max reward = ", max_ep_reward)
-print("Max action list = ", max_ep_action_list)
 
 # ===== traning =====
 Q = load_Qtable()
