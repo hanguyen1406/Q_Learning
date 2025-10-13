@@ -152,6 +152,7 @@ def step(action):
     return next_state, reward, done
 
 def _run_for(dt, v, w=0.0):
+    """Đi thẳng/lùi hoặc quay với tốc độ tuyến tính v, góc w trong dt giây"""
     wL = (v - 0.5 * w * BASELINE) / WHEEL_RADIUS
     wR = (v + 0.5 * w * BASELINE) / WHEEL_RADIUS
     sim.setJointTargetVelocity(left,  wL)
@@ -163,22 +164,25 @@ def _run_for(dt, v, w=0.0):
     sim.setJointTargetVelocity(right, 0)
 
 def move_cell(direction: str):
+    """Di chuyển 1 bước hoặc quay 10°"""
     global heading
     t_fwd = (MAP_RES / LIN_SPEED) * 0.7
-    small_angle = math.radians(20)
-    w_turn = 0.6
-    t_turn = small_angle / w_turn
+    ROT_SPEED = math.radians(30)  # tốc độ quay góc (rad/s)
+    ROT_ANGLE = math.radians(10)  # quay 10 độ
+    t_turn = abs(ROT_ANGLE / ROT_SPEED)
 
     if direction == "up":
-        _run_for(t_fwd, LIN_SPEED, 0.0)
+        _run_for(t_fwd, LIN_SPEED)
     elif direction == "down":
-        _run_for(t_fwd, -LIN_SPEED, 0.0)
+        _run_for(t_fwd, -LIN_SPEED)
     elif direction == "left":
-        _run_for(t_turn, 0.0, +w_turn)   # quay trái
-        heading += small_angle
+        heading += ROT_ANGLE
+        _run_for(t_turn, 0, w=ROT_SPEED)
+        sim.setObjectOrientation(robot, -1, [0, 0, heading])
     elif direction == "right":
-        _run_for(t_turn, 0.0, -w_turn)   # quay phải
-        heading -= small_angle
+        heading -= ROT_ANGLE
+        _run_for(t_turn, 0, w=-ROT_SPEED)
+        sim.setObjectOrientation(robot, -1, [0, 0, heading])
 
 
 def episode_loop():
